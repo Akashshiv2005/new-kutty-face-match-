@@ -1,0 +1,3 @@
+# KuttyStory Staging / Demo Quarantine
+User-agent: *
+Disallow: /

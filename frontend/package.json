@@ -1,0 +1,32 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "verify:seo": "node scripts/verify-seo-env.mjs",
+    "generate:seo": "node scripts/generate-seo-assets.mjs",
+    "test:jsonld": "node scripts/validate-jsonld.mjs",
+    "prerender": "node scripts/prerender.mjs",
+    "build": "node scripts/verify-seo-env.mjs && node scripts/generate-seo-assets.mjs && tsc && vite build && node scripts/prerender.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^1.56.0",
+    "page-flip": "^2.0.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.1.2",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vite": "^8.3.4"
+  }
+}

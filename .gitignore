@@ -1,0 +1,82 @@
+# ==============================================================================
+# Baby Story - Root .gitignore
+# ==============================================================================
+
+# Environment variables & secrets (keep .env.example tracked)
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+
+# Python Virtual Environments
+venv/
+venv*/
+.venv/
+.venv*/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python cache & compiler files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node & Frontend dependencies and build outputs
+node_modules/
+dist/
+dist-ssr/
+build/
+.next/
+.vercel/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Local SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+storybook.db
+
+Thumbs.db
+ehthumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backend Storage & Uploads
+
+backend/storage/
+
+
+
+# AI & ML Model Weights
+
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# Temporary processing, cache & scratch files
+cache/
+backend/cache/
+backend/scratch_*.png
+scratch/
+logs/
+backend/logs/
+*.log
+
+
+# Pytest Reports
+backend/reports/
