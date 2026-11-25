@@ -89,19 +89,37 @@ def swap_story_page(
     target_bytes: bytes,
     page_number: int,
     outfit_mode: str = "story",
-    job_id: str = "unknown"
+    job_id: str = "unknown",
+    story_slug: str = "unicorn-story"
 ) -> GenerationResult:
     """
     Directly passes the authentic child photograph and page illustration to Magic Hour API.
     Zero intermediate modifications, filters, or local processing.
     """
-    key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
+    key = os.getenv("MAGIC_HOUR_API_KEY", "").strip() or getattr(settings, "MAGIC_HOUR_API_KEY", "").strip()
     if not key:
         raise RuntimeError("MAGIC_HOUR_API_KEY is not configured in .env")
     if not source_path or not Path(source_path).is_file():
         raise ValueError(f"Child reference photo not found: {source_path}")
 
-    # Determine mode directly from .env and user outfit choice (default to ai_image_editor for 3D storybooks)
+    # Resolve story slug dynamically if job_id is provided
+    slug_lower = str(story_slug or "").strip().lower()
+    if (not slug_lower or slug_lower == "unicorn-story") and job_id and job_id != "unknown":
+        try:
+            from app.database import SessionLocal
+            from app.models import PersonalizationJob, StoryTemplate
+            with SessionLocal() as s_db:
+                p_job = s_db.query(PersonalizationJob).filter(PersonalizationJob.id == str(job_id)).first()
+                if p_job and p_job.story_id:
+                    s_tmpl = s_db.query(StoryTemplate).filter(StoryTemplate.id == p_job.story_id).first()
+                    if s_tmpl and s_tmpl.slug:
+                        slug_lower = str(s_tmpl.slug).strip().lower()
+        except Exception:
+            pass
+
+    is_boy_story = any(kw in slug_lower for kw in ("boy", "male", "son", "prince", "brother"))
+
+    # Determine mode directly from .env and user outfit choice (default to ai_image_editor for rich 3D character likeness)
     env_mode = os.getenv("MAGIC_HOUR_SWAP_MODE", "ai_image_editor").strip().lower()
     resolution = (os.getenv("MAGIC_HOUR_RESOLUTION", "") or getattr(settings, "MAGIC_HOUR_RESOLUTION", "1024px")).strip().lower() or "1024px"
 
@@ -135,20 +153,34 @@ def swap_story_page(
         if is_editor:
             editor_attempt = 0
             tight_face_path = Path(temp) / "tight_face_only.png"
+            is_anchor = any(kw in str(source_path).lower() for kw in ("canon_anchor", "p01", "ref_portrait", "anchor"))
             try:
                 import cv2
                 import numpy as np
+                import math
+
                 src_cv = cv2.imread(str(Path(source_path).resolve()))
-                if src_cv is not None:
+                tgt_cv = cv2.imread(str(target_path))
+
+                if is_anchor and src_cv is not None:
+                    # Canonical character portrait from Page 1: use directly to preserve exact hairstyle, forehead, and eyebrows
+                    print(f"[Magic Hour] Using Page 1 canonical character anchor directly as Image 2: {source_path}")
+                    cv2.imwrite(str(tight_face_path), src_cv)
+                elif src_cv is not None:
                     sh, sw = src_cv.shape[:2]
                     from app.services.ai.photo_validator import YUNET_PATH
-                    det = cv2.FaceDetectorYN_create(str(YUNET_PATH), "", (sw, sh), score_threshold=0.30)
-                    _, faces = det.detect(src_cv)
-                    if faces is not None and len(faces) > 0:
-                        fx, fy, fw, fh = [int(v) for v in faces[0][:4]]
-                        # Inset slightly from top to exclude any hair/tiara from source photo
-                        y1 = max(0, fy + int(fh * 0.05))
-                        y2 = min(sh, fy + fh + int(fh * 0.10))
+                    det_src = cv2.FaceDetectorYN_create(str(YUNET_PATH.resolve()), "", (sw, sh), score_threshold=0.25)
+                    _, s_faces = det_src.detect(src_cv)
+                    s_faces_sorted = sorted(s_faces, key=lambda f: f[-1], reverse=True) if s_faces is not None and len(s_faces) > 0 else []
+
+                    if len(s_faces_sorted) > 0:
+                        fs = s_faces_sorted[0]
+                        fx, fy, fw, fh = [int(v) for v in fs[:4]]
+
+                        # Natural child face portrait isolating facial identity (eyes, eyebrows, nose, cheeks, skin tone)
+                        # without voluminous outer hair dome or wide skull expansion that inflates head dimensions
+                        y1 = max(0, fy - int(fh * 0.05))
+                        y2 = min(sh, fy + fh + int(fh * 0.06))
                         x1 = max(0, fx - int(fw * 0.05))
                         x2 = min(sw, fx + fw + int(fw * 0.05))
                         crop = src_cv[y1:y2, x1:x2].copy()
@@ -157,8 +189,8 @@ def swap_story_page(
                         # Clean any pottu / bindi / mai / kohl marks from the face crop before AI fusion
                         # with 100% strict eyebrow and eye protection
                         try:
-                            re_x, re_y = int(faces[0][4]) - x1, int(faces[0][5]) - y1
-                            le_x, le_y = int(faces[0][6]) - x1, int(faces[0][7]) - y1
+                            re_x, re_y = int(fs[4]) - x1, int(fs[5]) - y1
+                            le_x, le_y = int(fs[6]) - x1, int(fs[7]) - y1
                             mid_eye_x = int((re_x + le_x) / 2)
                             eye_y = int((re_y + le_y) / 2)
 
@@ -184,7 +216,7 @@ def swap_story_page(
                                     cnts_f, _ = cv2.findContours(dark_f, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                     for c in cnts_f:
                                         if 2 <= cv2.contourArea(c) <= (fw * fh * 0.02):
-                                            cv2.drawContours(pottu_mask[fy_start:fy_end, fx_start:fx_end], [c], -1, 255, -1)
+                                             cv2.drawContours(pottu_mask[fy_start:fy_end, fx_start:fx_end], [c], -1, 255, -1)
 
                             mai_mask = np.zeros((ch, cw), dtype=np.uint8)
                             l_start_x = min(cw - 1, le_x + int(fw * 0.10))
@@ -206,9 +238,36 @@ def swap_story_page(
                                 combined_mark_mask = cv2.dilate(combined_mark_mask, k, iterations=1)
                                 combined_mark_mask[eyebrow_protect > 0] = 0
                                 crop = cv2.inpaint(crop, combined_mark_mask, 5, cv2.INPAINT_TELEA)
-                                print(f"[Magic Hour] Inpainted {np.sum(combined_mark_mask > 0)} pottu/mai mark pixels from tight face crop while protecting eyebrows.")
+                                print(f"[Magic Hour] Inpainted {np.sum(combined_mark_mask > 0)} pottu/mai mark pixels from face crop while protecting eyebrows.")
                         except Exception as clean_ex:
                             print(f"[Magic Hour] Notice during face mark clean: {clean_ex}")
+
+                        # Automated mouth neutralization: ensure the reference face crop has naturally sealed lips
+                        # so the diffusion model never copies an open mouth cavity or visible teeth into the storybook character
+                        try:
+                            rm_x, rm_y = int(fs[10]) - x1, int(fs[11]) - y1
+                            lm_x, lm_y = int(fs[12]) - x1, int(fs[13]) - y1
+                            mouth_cx = int((rm_x + lm_x) / 2)
+                            mouth_cy = int((rm_y + lm_y) / 2)
+                            mouth_w = int(abs(lm_x - rm_x))
+
+                            y_m1 = max(0, mouth_cy - int(mouth_w * 0.25))
+                            y_m2 = min(ch, mouth_cy + int(mouth_w * 0.25))
+                            x_m1 = max(0, mouth_cx - int(mouth_w * 0.45))
+                            x_m2 = min(cw, mouth_cx + int(mouth_w * 0.45))
+                            if y_m2 > y_m1 and x_m2 > x_m1:
+                                m_roi = crop[y_m1:y_m2, x_m1:x_m2]
+                                if m_roi.size > 0:
+                                    m_gray = cv2.cvtColor(m_roi, cv2.COLOR_BGR2GRAY)
+                                    dark_cavity = (m_gray < 85).astype(np.uint8) * 255
+                                    if np.sum(dark_cavity > 0) > (mouth_w * 0.5):
+                                        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                                        gap_mask = cv2.dilate(dark_cavity, k, iterations=2)
+                                        sealed_roi = cv2.inpaint(m_roi, gap_mask, 5, cv2.INPAINT_TELEA)
+                                        crop[y_m1:y_m2, x_m1:x_m2] = sealed_roi
+                                        print(f"[Magic Hour] Sealed open mouth gap in reference face crop ({np.sum(dark_cavity > 0)} pixels neutralized).")
+                        except Exception as mouth_ex:
+                            print(f"[Magic Hour] Notice during mouth neutralization: {mouth_ex}")
 
                         cv2.imwrite(str(tight_face_path), crop)
                     else:
@@ -216,21 +275,40 @@ def swap_story_page(
                 else:
                     tight_face_path = Path(source_path).resolve()
             except Exception as crop_err:
-                print(f"[Magic Hour] Notice during tight face crop: {crop_err}")
+                print(f"[Magic Hour] Notice during face crop preparation: {crop_err}")
                 tight_face_path = Path(source_path).resolve()
 
+            if is_boy_story:
+                char_title = "young boy's"
+                hair_guidance = (
+                    "CRITICAL HAIRSTYLE RULE: Strictly preserve the character's exact original storybook hairstyle, hair volume, hair contour, hairline, and neat side-parting from Image 1. "
+                    "Keep the hair close-cropped, compact, and neatly combed to the skull exactly as in Image 1."
+                )
+                attire_guidance = "pajamas and outfit in Image 1"
+                expression_guidance = "CRITICAL EXPRESSION RULE: Serene bedtime expression with naturally closed lips."
+            elif "unicorn" in slug_lower or "girl" in slug_lower or "princess" in slug_lower:
+                char_title = "young girl's"
+                hair_guidance = (
+                    "CRITICAL HAIRSTYLE RULE: Strictly preserve the young girl's exact original hairstyle, high tied-up hair bun, neat hairline, braided hair crown, and loose wavy strands from Image 1."
+                )
+                attire_guidance = "pink gown in Image 1"
+                expression_guidance = "CRITICAL EXPRESSION RULE: Sweet, radiant, cheerful, gentle smile matching Image 1."
+            else:
+                char_title = "character's"
+                hair_guidance = "CRITICAL HAIRSTYLE RULE: Strictly preserve the default storybook character's hairstyle, haircut, and parting from Image 1."
+                attire_guidance = "clothing in Image 1"
+                expression_guidance = "CRITICAL EXPRESSION RULE: Naturally match the character's storybook expression in Image 1."
+
             editor_prompt = (
-                "In Image 1, replace the young girl's facial features with the authentic facial features of the child from Image 2 "
-                "(eyes, eyebrows, nose, mouth, cheeks, smile, facial expression). "
-                "Eyebrows: Keep both left and right eyebrows full, distinct, completely intact, natural, and beautifully defined; do not cut, trim, or erase the eyebrows. "
-                "Keep the head and face slender, petite, and anatomically proportionate to the character's delicate neck, shoulders, and pink gown in Image 1. "
-                "Do not make the head, face, or cheeks too wide, chubby, or oversized. "
-                "Skin and Body Color Matching: Use the exact skin color, warmth, and lighting of the character's body, neck, and chest in Image 1 on the face so the face and body color match seamlessly with zero skin tone mismatch. "
-                "Clean Flawless Skin: Do NOT transfer or include any bindi, pottu, forehead marks, black dots, or mai/kohl marks on the cheeks or chin. The skin must be clean, clear, flawless fairytale skin. "
-                "Hair: Keep the girl's original hairstyle exactly as in Image 1 (high tied-up hair bun, brown hair color, braided hair crown, hairline, and loose hair strands). "
-                "Do not use any haircut or tiara from Image 2. "
-                "Seamlessly blend the child's face into the 3D children's digital storybook illustration style. "
-                "Preserve the dress, body, and background scenery."
+                f"FACE REPLACEMENT INSTRUCTION: Replace the {char_title} face and facial identity in Image 1 with the authentic face of the child in Image 2! "
+                f"The character in Image 1 MUST clearly, strongly, and unmistakably look like the child in Image 2. "
+                "FAITHFUL FACIAL STRUCTURE & TRUE IDENTITY: The character MUST have the exact same facial structure, authentic face shape, jawline contour, chin curvature, cheek fullness, almond eye shape, eyelid creases, eyebrows, nose shape, and lip geometry as the child in Image 2. "
+                "Faithfully preserve the child's authentic facial geometry, soft jawline, and bone structure with 100% fidelity. Do NOT alter, do NOT narrow, and do NOT sharpen the jawline. "
+                "PETITE COMPACT HEAD & FACE SIZE: The character's head and face size must be slightly smaller, compact, and petite, perfectly scaled to the small child body, neck, and collar in Image 1 (matching the compact proportion of Page 3). Keep the head and face slender and cleanly fitted to the small body with zero enlargement. "
+                f"{hair_guidance} "
+                f"{expression_guidance} "
+                "3D ANIMATED STORYBOOK STYLE: Seamlessly render the child's authentic face into the 3D Pixar/Disney animated storybook art style of Image 1. "
+                f"Clean Flawless Skin: Flawless fairytale skin. Preserve the {attire_guidance}, body, and background scenery in Image 1."
             )
 
             editor_model = os.getenv("MAGIC_HOUR_EDITOR_MODEL", "qwen-image-2.1").strip()
@@ -606,7 +684,7 @@ def swap_story_page(
                     det = cv2.FaceDetectorYN_create(str(YUNET_PATH), "", (gw, gh), score_threshold=0.25)
                     _, f_res = det.detect(bgr)
                     if f_res is not None and len(f_res) > 0:
-                        char_f = max(f_res, key=lambda f: f[2] * f[3])
+                        char_f = max(f_res, key=lambda f: f[-1])
                         fx, fy, fw, fh = [int(v) for v in char_f[:4]]
                         re_x, re_y = int(char_f[4]), int(char_f[5])
                         le_x, le_y = int(char_f[6]), int(char_f[7])
@@ -664,85 +742,90 @@ def swap_story_page(
             print(f"[Magic Hour] Notice during post-generation pottu removal: {post_mark_ex}")
 
         # B2. Match face skin tone to character body/neck and apply digital art skin smoothness
-        try:
-            import cv2
-            import numpy as np
-            from app.services.ai.photo_validator import YUNET_PATH
-            if YUNET_PATH.exists():
-                arr = np.frombuffer(img_bytes, np.uint8)
-                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if bgr is not None:
-                    gh, gw = bgr.shape[:2]
-                    det = cv2.FaceDetectorYN_create(str(YUNET_PATH), "", (gw, gh), score_threshold=0.25)
-                    _, f_res = det.detect(bgr)
-                    if f_res is not None and len(f_res) > 0:
-                        char_f = max(f_res, key=lambda f: f[-1])
-                        fx, fy, fw, fh = [int(v) for v in char_f[:4]]
-                        re_x, re_y = int(char_f[4]), int(char_f[5])
-                        le_x, le_y = int(char_f[6]), int(char_f[7])
-                        mouth_cx = int((char_f[10] + char_f[12]) / 2)
-                        mouth_cy = int((char_f[11] + char_f[13]) / 2)
+        # (Only needed for face_swap_photo; ai_image_editor already generates native cohesive lighting and skin)
+        if not is_editor:
+            try:
+                import cv2
+                import numpy as np
+                from app.services.ai.photo_validator import YUNET_PATH
+                if YUNET_PATH.exists():
+                    arr = np.frombuffer(img_bytes, np.uint8)
+                    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if bgr is not None:
+                        gh, gw = bgr.shape[:2]
+                        det = cv2.FaceDetectorYN_create(str(YUNET_PATH), "", (gw, gh), score_threshold=0.25)
+                        _, f_res = det.detect(bgr)
+                        if f_res is not None and len(f_res) > 0:
+                            char_f = max(f_res, key=lambda f: f[-1])
+                            fx, fy, fw, fh = [int(v) for v in char_f[:4]]
+                            re_x, re_y = int(char_f[4]), int(char_f[5])
+                            le_x, le_y = int(char_f[6]), int(char_f[7])
+                            mouth_cx = int((char_f[10] + char_f[12]) / 2)
+                            mouth_cy = int((char_f[11] + char_f[13]) / 2)
 
-                        neck_y1 = min(gh - 1, fy + fh + int(fh * 0.05))
-                        neck_y2 = min(gh, fy + fh + int(fh * 0.25))
-                        neck_x1 = max(0, fx + int(fw * 0.25))
-                        neck_x2 = min(gw, fx + int(fw * 0.75))
-                        body_roi = bgr[neck_y1:neck_y2, neck_x1:neck_x2]
+                            neck_y1 = min(gh - 1, fy + fh + int(fh * 0.05))
+                            neck_y2 = min(gh, fy + fh + int(fh * 0.25))
+                            neck_x1 = max(0, fx + int(fw * 0.25))
+                            neck_x2 = min(gw, fx + int(fw * 0.75))
+                            body_roi = bgr[neck_y1:neck_y2, neck_x1:neck_x2]
 
-                        if page_number == 1:
-                            arm_roi = bgr[min(gh - 1, fy + int(fh * 0.9)):min(gh, fy + int(fh * 1.3)), max(0, fx - int(fw * 0.35)):max(0, fx - int(fw * 0.1))]
-                            if arm_roi.size > 0:
-                                body_roi = arm_roi
+                            if body_roi.size > 0:
+                                body_lab = cv2.cvtColor(body_roi, cv2.COLOR_BGR2LAB).astype(np.float32)
+                                # Robust skin filter: only sample genuine skin pixels (A > 130, B > 130)
+                                skin_px = body_lab[(body_lab[:, :, 1] > 130) & (body_lab[:, :, 2] > 130)]
+                                if skin_px.size > 0:
+                                    b_L_mean = float(np.mean(skin_px[:, 0]))
+                                    b_A_mean = float(np.mean(skin_px[:, 1]))
+                                    b_B_mean = float(np.mean(skin_px[:, 2]))
+                                else:
+                                    b_L_mean = float(np.mean(body_lab[:, :, 0]))
+                                    b_A_mean = float(np.mean(body_lab[:, :, 1]))
+                                    b_B_mean = float(np.mean(body_lab[:, :, 2]))
 
-                        if body_roi.size > 0:
-                            body_lab = cv2.cvtColor(body_roi, cv2.COLOR_BGR2LAB).astype(np.float32)
-                            b_L_mean = float(np.mean(body_lab[:, :, 0]))
-                            b_A_mean = float(np.mean(body_lab[:, :, 1]))
-                            b_B_mean = float(np.mean(body_lab[:, :, 2]))
+                                # Protect warm fairytale skin tone: avoid dulling or green shifting
+                                b_L_mean = max(135.0, min(175.0, b_L_mean))
+                                b_A_mean = max(142.0, min(165.0, b_A_mean))
+                                b_B_mean = max(150.0, min(175.0, b_B_mean))
 
-                            b_L_mean = max(140.0, min(165.0, b_L_mean))
-                            b_A_mean = max(138.0, min(148.0, b_A_mean))
-                            b_B_mean = max(150.0, min(162.0, b_B_mean))
+                                skin_mask = np.zeros((gh, gw), dtype=np.uint8)
+                                center = (fx + fw // 2, fy + int(fh * 0.50))
+                                axes = (int(fw * 0.44), int(fh * 0.47))
+                                cv2.ellipse(skin_mask, center, axes, 0, 0, 360, 255, -1)
 
-                            skin_mask = np.zeros((gh, gw), dtype=np.uint8)
-                            center = (fx + fw // 2, fy + int(fh * 0.50))
-                            axes = (int(fw * 0.44), int(fh * 0.47))
-                            cv2.ellipse(skin_mask, center, axes, 0, 0, 360, 255, -1)
+                                eye_r = int(fw * 0.14)
+                                cv2.circle(skin_mask, (re_x, re_y), eye_r, 0, -1)
+                                cv2.circle(skin_mask, (le_x, le_y), eye_r, 0, -1)
+                                # Protect eyebrows completely from smoothing & color alteration
+                                cv2.ellipse(skin_mask, (re_x, re_y - int(fh * 0.08)), (int(fw * 0.20), int(fh * 0.09)), 0, 0, 360, 0, -1)
+                                cv2.ellipse(skin_mask, (le_x, le_y - int(fh * 0.08)), (int(fw * 0.20), int(fh * 0.09)), 0, 0, 360, 0, -1)
+                                cv2.ellipse(skin_mask, (mouth_cx, mouth_cy), (int(fw * 0.22), int(fh * 0.12)), 0, 0, 360, 0, -1)
 
-                            eye_r = int(fw * 0.14)
-                            cv2.circle(skin_mask, (re_x, re_y), eye_r, 0, -1)
-                            cv2.circle(skin_mask, (le_x, le_y), eye_r, 0, -1)
-                            # Protect eyebrows completely from smoothing & color alteration
-                            cv2.ellipse(skin_mask, (re_x, re_y - int(fh * 0.08)), (int(fw * 0.20), int(fh * 0.09)), 0, 0, 360, 0, -1)
-                            cv2.ellipse(skin_mask, (le_x, le_y - int(fh * 0.08)), (int(fw * 0.20), int(fh * 0.09)), 0, 0, 360, 0, -1)
-                            cv2.ellipse(skin_mask, (mouth_cx, mouth_cy), (int(fw * 0.22), int(fh * 0.12)), 0, 0, 360, 0, -1)
+                                smooth_bgr = cv2.bilateralFilter(bgr, d=11, sigmaColor=75, sigmaSpace=75)
+                                smooth_lab = cv2.cvtColor(smooth_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-                            smooth_bgr = cv2.bilateralFilter(bgr, d=11, sigmaColor=75, sigmaSpace=75)
-                            smooth_lab = cv2.cvtColor(smooth_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+                                curr_L = float(np.mean(smooth_lab[:, :, 0][skin_mask > 0]))
+                                curr_A = float(np.mean(smooth_lab[:, :, 1][skin_mask > 0]))
+                                curr_B = float(np.mean(smooth_lab[:, :, 2][skin_mask > 0]))
 
-                            curr_L = float(np.mean(smooth_lab[:, :, 0][skin_mask > 0]))
-                            curr_A = float(np.mean(smooth_lab[:, :, 1][skin_mask > 0]))
-                            curr_B = float(np.mean(smooth_lab[:, :, 2][skin_mask > 0]))
+                                dL = (b_L_mean - curr_L) * 0.70
+                                dA = (b_A_mean - curr_A) * 0.70
+                                dB = (b_B_mean - curr_B) * 0.70
 
-                            dL = (b_L_mean - curr_L) * 0.85
-                            dA = (b_A_mean - curr_A) * 0.85
-                            dB = (b_B_mean - curr_B) * 0.85
+                                smooth_lab[:, :, 0] = np.clip(smooth_lab[:, :, 0] + dL, 0, 255)
+                                smooth_lab[:, :, 1] = np.clip(smooth_lab[:, :, 1] + dA, 0, 255)
+                                smooth_lab[:, :, 2] = np.clip(smooth_lab[:, :, 2] + dB, 0, 255)
 
-                            smooth_lab[:, :, 0] = np.clip(smooth_lab[:, :, 0] + dL, 0, 255)
-                            smooth_lab[:, :, 1] = np.clip(smooth_lab[:, :, 1] + dA, 0, 255)
-                            smooth_lab[:, :, 2] = np.clip(smooth_lab[:, :, 2] + dB, 0, 255)
+                                toned_bgr = cv2.cvtColor(smooth_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+                                feather = cv2.GaussianBlur(skin_mask.astype(np.float32) / 255.0, (25, 25), 8)
+                                alpha = np.repeat(feather[:, :, np.newaxis], 3, axis=2)
 
-                            toned_bgr = cv2.cvtColor(smooth_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-                            feather = cv2.GaussianBlur(skin_mask.astype(np.float32) / 255.0, (11, 11), 0)
-                            alpha = np.repeat(feather[:, :, np.newaxis], 3, axis=2)
-
-                            result_bgr = (toned_bgr.astype(np.float32) * alpha + bgr.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
-                            ok, enc = cv2.imencode(".png", result_bgr)
-                            if ok:
-                                img_bytes = enc.tobytes()
-                                print(f"[Magic Hour] Successfully matched face skin to body color (L={b_L_mean:.1f}) and applied digital art smoothness.")
-        except Exception as body_match_ex:
-            print(f"[Magic Hour] Notice during skin color matching and smoothing: {body_match_ex}")
+                                result_bgr = (toned_bgr.astype(np.float32) * alpha + bgr.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
+                                ok, enc = cv2.imencode(".png", result_bgr)
+                                if ok:
+                                    img_bytes = enc.tobytes()
+                                    print(f"[Magic Hour] Successfully matched face skin to body color (L={b_L_mean:.1f}) and applied digital art smoothness.")
+            except Exception as body_match_ex:
+                print(f"[Magic Hour] Notice during skin color matching and smoothing: {body_match_ex}")
 
         # C. Verify a face is present in generated output using YuNet
         has_face_in_output = True
@@ -764,15 +847,36 @@ def swap_story_page(
             except Exception as check_ex:
                 print(f"[Magic Hour] Notice during output face sanity check: {check_ex}")
 
-        # D. Verify face was actually swapped (detect silent no-ops where target image is unchanged)
+        # D. Strict Face Swap Verification: Ensure character face was actually replaced and is NOT the raw plate
         try:
+            import cv2
             import numpy as np
-            with Image.open(io.BytesIO(img_bytes)) as out_im, Image.open(io.BytesIO(target_bytes)) as tgt_im:
-                out_sample = np.array(out_im.convert("RGB").resize((128, 128), Image.Resampling.BILINEAR), dtype=np.float32)
-                tgt_sample = np.array(tgt_im.convert("RGB").resize((128, 128), Image.Resampling.BILINEAR), dtype=np.float32)
-                diff_mean = float(np.mean(np.abs(out_sample - tgt_sample)))
-                if diff_mean < 3.0:
-                    raise RuntimeError(f"Magic Hour output is identical to target plate (mean pixel delta {diff_mean:.2f} < 3.0). Face was not modified.")
+            from app.services.ai.photo_validator import YUNET_PATH
+            if YUNET_PATH.exists():
+                arr_out = np.frombuffer(img_bytes, np.uint8)
+                bgr_out = cv2.imdecode(arr_out, cv2.IMREAD_COLOR)
+                arr_tgt = np.frombuffer(target_bytes, np.uint8)
+                bgr_tgt = cv2.imdecode(arr_tgt, cv2.IMREAD_COLOR)
+                if bgr_out is not None and bgr_tgt is not None:
+                    th, tw = bgr_tgt.shape[:2]
+                    det_t = cv2.FaceDetectorYN_create(str(YUNET_PATH.resolve()), "", (tw, th), score_threshold=0.25)
+                    _, t_faces = det_t.detect(bgr_tgt)
+                    if t_faces is not None and len(t_faces) > 0:
+                        tf = max(t_faces, key=lambda f: f[-1])
+                        t_fx, t_fy, t_fw, t_fh = [int(v) for v in tf[:4]]
+                        cf_y1 = max(0, t_fy + int(t_fh * 0.15))
+                        cf_y2 = min(th, t_fy + int(t_fh * 0.85))
+                        cf_x1 = max(0, t_fx + int(t_fw * 0.15))
+                        cf_x2 = min(tw, t_fx + int(t_fw * 0.85))
+                        if cf_y2 > cf_y1 and cf_x2 > cf_x1:
+                            face_tgt_crop = bgr_tgt[cf_y1:cf_y2, cf_x1:cf_x2]
+                            face_out_crop = bgr_out[cf_y1:cf_y2, cf_x1:cf_x2]
+                            face_delta = float(np.mean(np.abs(face_out_crop.astype(np.float32) - face_tgt_crop.astype(np.float32))))
+                            print(f"[Magic Hour] Page {page_number} face swap delta: {face_delta:.2f}")
+                            if face_delta < 12.0:
+                                raise RuntimeError(
+                                    f"Magic Hour output returned unmodified raw template face (face delta {face_delta:.2f} < 12.0). Face was not replaced."
+                                )
         except RuntimeError:
             raise
         except Exception as diff_ex:

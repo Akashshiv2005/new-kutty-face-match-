@@ -106,7 +106,7 @@ def classify_error(err: Any) -> Tuple[MagicHourErrorCode, str, bool]:
     if isinstance(err, (FileNotFoundError, ValueError)) or "not found" in err_lower or "missing" in err_lower:
         return MagicHourErrorCode.MISSING_INPUT, err_str, False
 
-    if isinstance(err, httpx.NetworkError) or "connection" in err_lower:
+    if isinstance(err, httpx.NetworkError) or "connection" in err_lower or "getaddrinfo" in err_lower or "dns" in err_lower:
         return MagicHourErrorCode.TIMEOUT, f"Network connection error: {err_str}", True
 
     return MagicHourErrorCode.UNKNOWN, err_str, False

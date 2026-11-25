@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     # Face Swap & Photo Providers Configuration
     FACE_SWAP_PROVIDER: str = os.getenv("FACE_SWAP_PROVIDER", "local")
     MAGIC_HOUR_API_KEY: str = os.getenv("MAGIC_HOUR_API_KEY", "")
+    MAGIC_HOUR_MOUTH_EXPRESSION: str = os.getenv("MAGIC_HOUR_MOUTH_EXPRESSION", "closed_mouth")
     ALLOW_LOCAL_FALLBACK: bool = os.getenv("ALLOW_LOCAL_FALLBACK", "false").strip().lower() in ("true", "1", "yes")
 
     # Magic Hour Concurrency & Retry Settings (Default 3 for Creator Plan concurrency)

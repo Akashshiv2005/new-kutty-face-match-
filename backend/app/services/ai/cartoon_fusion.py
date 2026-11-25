@@ -516,7 +516,7 @@ class CartoonCharacterFusionEngine:
                 print(f"[CartoonCharacterFusionEngine] WARNING: MAGIC_HOUR_API_KEY missing. Falling back to local fusion because ALLOW_LOCAL_FALLBACK=True.")
             else:
                 try:
-                    return swap_story_page(source_path, page_bytes, page_number, outfit_mode=outfit_mode, job_id=str(job_id or "unknown"))
+                    return swap_story_page(source_path, page_bytes, page_number, outfit_mode=outfit_mode, job_id=str(job_id or "unknown"), story_slug=story_slug)
                 except Exception as mh_exc:
                     if not allow_local:
                         raise
